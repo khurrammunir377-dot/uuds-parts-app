@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 const Color kPrimary = Color(0xFF0B3D91); // company navy blue
 const Color kAccent = Color(0xFFE8A317); // amber accent
 const Color kDispatch = Color(0xFFB0470A);
+const Color kHeaderBlue = Color(0xFF4FC3F7); // bright blue for headings on dark backgrounds
 
 List<BoxShadow> kRaisedShadow = [
   BoxShadow(

@@ -3,6 +3,28 @@ import 'package:path/path.dart';
 import '../models/models.dart';
 import '../utils/inspector_roster.dart';
 
+/// The fixed set of part locations used by the app. Keep this list as the
+/// single source of truth — both fresh installs (onCreate) and existing
+/// installs (onUpgrade migration) seed from it.
+const List<String> kDefaultPartLocations = [
+  'LAV 3UE',
+  'LAV 3UF',
+  'LAV 3UG',
+  'LAV 3UH',
+  'LAV 5ML',
+  'LAV 5MJ',
+  'LAV 5MI',
+  'LAV 5MK',
+  'LAV 1UB',
+  'LAV 1 MC',
+  'LAV 2MM',
+  'LAV 1MA',
+  'LAV 3MH',
+  'LAV 1MB',
+  'LAV 3MG',
+  'LAV 1UA',
+];
+
 class DBHelper {
   DBHelper._();
   static final DBHelper instance = DBHelper._();
@@ -26,7 +48,7 @@ class DBHelper {
     _dbPath = path;
     return openDatabase(
       path,
-      version: 4,
+      version: 5,
       onCreate: (db, version) async {
         await db.execute('''
           CREATE TABLE employees(
@@ -48,6 +70,12 @@ class DBHelper {
           )
         ''');
         await db.execute('''
+          CREATE TABLE settings(
+            key TEXT PRIMARY KEY,
+            value TEXT
+          )
+        ''');
+        await db.execute('''
           CREATE TABLE photos(
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             employeeName TEXT NOT NULL,
@@ -63,18 +91,7 @@ class DBHelper {
             tagQty TEXT DEFAULT ''
           )
         ''');
-        for (final loc in [
-          'Cockpit',
-          'Forward Galley',
-          'Aft Galley',
-          'Forward Lavatory',
-          'Aft Lavatory',
-          'Cabin - Seat Row',
-          'Cargo Bay',
-          'Overhead Bin',
-          'Sidewall Panel',
-          'Divider / Partition',
-        ]) {
+        for (final loc in kDefaultPartLocations) {
           await db.insert('part_locations', {'name': loc});
         }
         for (final entry in InspectorRoster.seed) {
@@ -99,7 +116,38 @@ class DBHelper {
                 conflictAlgorithm: ConflictAlgorithm.ignore);
           }
         }
+        if (oldVersion < 5) {
+          await db.execute('''
+            CREATE TABLE IF NOT EXISTS settings(
+              key TEXT PRIMARY KEY,
+              value TEXT
+            )
+          ''');
+          // Replace the old part-locations list with the new fixed set.
+          await db.delete('part_locations');
+          for (final loc in kDefaultPartLocations) {
+            await db.insert('part_locations', {'name': loc},
+                conflictAlgorithm: ConflictAlgorithm.ignore);
+          }
+        }
       },
+    );
+  }
+
+  // ---------- Settings (small key/value store, e.g. last-used inspector) ----------
+  Future<String?> getSetting(String key) async {
+    final db = await database;
+    final rows = await db.query('settings', where: 'key = ?', whereArgs: [key], limit: 1);
+    if (rows.isEmpty) return null;
+    return rows.first['value'] as String?;
+  }
+
+  Future<void> setSetting(String key, String value) async {
+    final db = await database;
+    await db.insert(
+      'settings',
+      {'key': key, 'value': value},
+      conflictAlgorithm: ConflictAlgorithm.replace,
     );
   }
 
@@ -150,6 +198,23 @@ class DBHelper {
       if (key != null && key == n) return Employee.fromMap(row);
     }
     return null;
+  }
+
+  /// Returns employees whose staff ID starts with [prefix] (e.g. "4" matches
+  /// "4", "47", "476"...), for use in a live suggestions dropdown while the
+  /// user is typing an ID. Empty/blank prefixes return no suggestions.
+  Future<List<Employee>> getEmployeesByIdPrefix(String prefix) async {
+    final p = prefix.trim();
+    if (p.isEmpty) return [];
+    final db = await database;
+    final rows = await db.query(
+      'employees',
+      where: "idNumber != '' AND idNumber LIKE ?",
+      whereArgs: ['$p%'],
+      orderBy: 'idNumber ASC',
+      limit: 8,
+    );
+    return rows.map((e) => Employee.fromMap(e)).toList();
   }
 
   // ---------- Aircraft ----------

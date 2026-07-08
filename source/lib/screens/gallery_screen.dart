@@ -1,8 +1,12 @@
 import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:share_plus/share_plus.dart';
 import '../db/db_helper.dart';
 import '../models/models.dart';
+import '../utils/backup_util.dart';
+import '../utils/build_info.dart';
 import '../utils/page_transitions.dart';
+import '../utils/storage_paths.dart';
 import '../utils/theme.dart';
 import '../widgets/app_bottom_nav.dart';
 import 'photo_viewer_screen.dart';
@@ -16,19 +20,60 @@ class GalleryScreen extends StatefulWidget {
 
 class _GalleryScreenState extends State<GalleryScreen> {
   List<InspectionPhoto> _photos = [];
+  List<Employee> _employees = [];
   bool _loading = true;
+  bool _backingUp = false;
   String _search = '';
+  String _storagePathLabel = '';
+
+  // Multi-select mode, so 2+ photos can be shared together at once.
+  bool _selectMode = false;
+  final Set<int> _selectedIds = {};
+
+  Map<String, String> get _idByName => {for (final e in _employees) e.name: e.idNumber};
+
+  String _idLabel(InspectionPhoto p) {
+    final id = _idByName[p.employeeName];
+    if (id != null && id.isNotEmpty) return 'UUDS-$id';
+    return p.employeeName;
+  }
+
+  String _formatTimestamp(String iso) {
+    try {
+      final dt = DateTime.parse(iso).toLocal();
+      final dd = dt.day.toString().padLeft(2, '0');
+      final mm = dt.month.toString().padLeft(2, '0');
+      final yy = dt.year.toString();
+      final hour24 = dt.hour;
+      final hour12 = hour24 % 12 == 0 ? 12 : hour24 % 12;
+      final min = dt.minute.toString().padLeft(2, '0');
+      final ampm = hour24 >= 12 ? 'PM' : 'AM';
+      return '$dd/$mm/$yy  $hour12:$min $ampm';
+    } catch (_) {
+      return '';
+    }
+  }
 
   @override
   void initState() {
     super.initState();
     _load();
+    _loadStoragePath();
+  }
+
+  Future<void> _loadStoragePath() async {
+    final root = await StoragePaths.root();
+    if (mounted) {
+      setState(() => _storagePathLabel = root.path);
+    }
   }
 
   Future<void> _load() async {
     final photos = await DBHelper.instance.getPhotos();
+    final employees = await DBHelper.instance.getEmployees();
     setState(() {
       _photos = photos;
+      _employees = employees;
       _loading = false;
     });
   }
@@ -59,6 +104,164 @@ class _GalleryScreenState extends State<GalleryScreen> {
     }
   }
 
+  Future<void> _sharePhoto(InspectionPhoto p) async {
+    final file = File(p.filePath);
+    if (!await file.exists()) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Photo file not found on device.')),
+        );
+      }
+      return;
+    }
+    final caption = '${p.aircraftReg} - ${p.inspectionType} - ${p.partLocation}';
+    await Share.shareXFiles([XFile(file.path)], text: caption);
+  }
+
+  void _toggleSelectMode() {
+    setState(() {
+      _selectMode = !_selectMode;
+      _selectedIds.clear();
+    });
+  }
+
+  void _toggleSelected(InspectionPhoto p) {
+    if (p.id == null) return;
+    setState(() {
+      if (_selectedIds.contains(p.id)) {
+        _selectedIds.remove(p.id);
+      } else {
+        _selectedIds.add(p.id!);
+      }
+    });
+  }
+
+  Future<void> _shareSelected() async {
+    final selectedPhotos = _photos.where((p) => _selectedIds.contains(p.id)).toList();
+    final files = <XFile>[];
+    for (final p in selectedPhotos) {
+      final f = File(p.filePath);
+      if (await f.exists()) files.add(XFile(f.path));
+    }
+    if (files.isEmpty) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('None of the selected photos were found on device.')),
+        );
+      }
+      return;
+    }
+    await Share.shareXFiles(files, text: 'UUDS Aero DWC - ${files.length} photo(s)');
+    if (mounted) {
+      setState(() {
+        _selectMode = false;
+        _selectedIds.clear();
+      });
+    }
+  }
+
+  Future<void> _backup() async {
+    final selection = await _showBackupSelectionDialog();
+    if (selection == null) return;
+    setState(() => _backingUp = true);
+    try {
+      final path = await BackupUtil.createSelectiveBackupAndShare(selection['aircraft']!, selection['locations']!);
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Backup saved: $path')));
+    } catch (e) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Backup failed: $e')));
+    } finally {
+      if (mounted) setState(() => _backingUp = false);
+    }
+  }
+
+  Future<Map<String, Set<String>>?> _showBackupSelectionDialog() async {
+    final aircraftList = await DBHelper.instance.getAircraft();
+    final locationList = await DBHelper.instance.getPartLocations();
+    Set<String> selectedAircraft = aircraftList.map((a) => a.regNo).toSet();
+    Set<String> selectedLocations = locationList.map((l) => l.name).toSet();
+
+    if (!mounted) return null;
+    return showDialog<Map<String, Set<String>>>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDialogState) => AlertDialog(
+          title: const Text('Select Backup Scope'),
+          content: SizedBox(
+            width: double.maxFinite,
+            child: SingleChildScrollView(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      const Text('Aircraft', style: TextStyle(fontWeight: FontWeight.bold)),
+                      TextButton(
+                        onPressed: () => setDialogState(() {
+                          selectedAircraft =
+                              selectedAircraft.length == aircraftList.length ? {} : aircraftList.map((a) => a.regNo).toSet();
+                        }),
+                        child: const Text('Toggle All'),
+                      ),
+                    ],
+                  ),
+                  ...aircraftList.map((a) => CheckboxListTile(
+                        dense: true,
+                        contentPadding: EdgeInsets.zero,
+                        title: Text(a.regNo),
+                        value: selectedAircraft.contains(a.regNo),
+                        onChanged: (v) => setDialogState(() {
+                          if (v == true) {
+                            selectedAircraft.add(a.regNo);
+                          } else {
+                            selectedAircraft.remove(a.regNo);
+                          }
+                        }),
+                      )),
+                  const Divider(),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      const Text('Part Locations', style: TextStyle(fontWeight: FontWeight.bold)),
+                      TextButton(
+                        onPressed: () => setDialogState(() {
+                          selectedLocations =
+                              selectedLocations.length == locationList.length ? {} : locationList.map((l) => l.name).toSet();
+                        }),
+                        child: const Text('Toggle All'),
+                      ),
+                    ],
+                  ),
+                  ...locationList.map((l) => CheckboxListTile(
+                        dense: true,
+                        contentPadding: EdgeInsets.zero,
+                        title: Text(l.name),
+                        value: selectedLocations.contains(l.name),
+                        onChanged: (v) => setDialogState(() {
+                          if (v == true) {
+                            selectedLocations.add(l.name);
+                          } else {
+                            selectedLocations.remove(l.name);
+                          }
+                        }),
+                      )),
+                ],
+              ),
+            ),
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+            FilledButton(
+              onPressed: () => Navigator.pop(ctx, {'aircraft': selectedAircraft, 'locations': selectedLocations}),
+              child: const Text('Backup'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   // aircraftReg -> inspectionType -> partLocation -> photos
   Map<String, Map<String, Map<String, List<InspectionPhoto>>>> _buildTree() {
     final tree = <String, Map<String, Map<String, List<InspectionPhoto>>>>{};
@@ -83,7 +286,27 @@ class _GalleryScreenState extends State<GalleryScreen> {
     final aircraftKeys = tree.keys.toList()..sort();
 
     return Scaffold(
-      appBar: AppBar(title: const Text('Photo Gallery')),
+      appBar: AppBar(
+        title: Text(_selectMode ? '${_selectedIds.length} selected' : 'Photo Gallery'),
+        actions: [
+          IconButton(
+            icon: Icon(_selectMode ? Icons.close_rounded : Icons.checklist_rounded),
+            tooltip: _selectMode ? 'Cancel selection' : 'Select photos to share',
+            onPressed: _toggleSelectMode,
+          ),
+          if (!_selectMode)
+            _backingUp
+                ? const Padding(
+                    padding: EdgeInsets.all(14),
+                    child: SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white)),
+                  )
+                : IconButton(
+                    icon: const Icon(Icons.backup_rounded),
+                    tooltip: 'Backup Data',
+                    onPressed: _backup,
+                  ),
+        ],
+      ),
       bottomNavigationBar: const AppBottomNav(current: AppTab.gallery),
       body: SafeArea(
         child: Column(
@@ -160,16 +383,116 @@ class _GalleryScreenState extends State<GalleryScreen> {
                                                 itemCount: photos.length,
                                                 itemBuilder: (ctx, gi) {
                                                   final p = photos[gi];
+                                                  final selected = _selectedIds.contains(p.id);
                                                   return GestureDetector(
-                                                    onTap: () => Navigator.of(context).push(
-                                                      fadeSlideRoute(PhotoViewerScreen(photo: p)),
-                                                    ).then((_) => _load()),
-                                                    onLongPress: () => _deletePhoto(p),
+                                                    onTap: () {
+                                                      if (_selectMode) {
+                                                        _toggleSelected(p);
+                                                        return;
+                                                      }
+                                                      Navigator.of(context).push(
+                                                        fadeSlideRoute(PhotoViewerScreen(
+                                                          photos: photos,
+                                                          initialIndex: gi,
+                                                          idByName: _idByName,
+                                                        )),
+                                                      ).then((_) => _load());
+                                                    },
+                                                    onLongPress: () {
+                                                      if (_selectMode) {
+                                                        _toggleSelected(p);
+                                                      } else {
+                                                        _deletePhoto(p);
+                                                      }
+                                                    },
                                                     child: ClipRRect(
                                                       borderRadius: BorderRadius.circular(6),
-                                                      child: File(p.filePath).existsSync()
-                                                          ? Image.file(File(p.filePath), fit: BoxFit.cover)
-                                                          : Container(color: Colors.grey[300], child: const Icon(Icons.broken_image)),
+                                                      child: Stack(
+                                                        fit: StackFit.expand,
+                                                        children: [
+                                                          File(p.filePath).existsSync()
+                                                              ? Image.file(File(p.filePath), fit: BoxFit.cover)
+                                                              : Container(color: Colors.grey[300], child: const Icon(Icons.broken_image)),
+                                                          Positioned(
+                                                            left: 0,
+                                                            right: 0,
+                                                            top: 0,
+                                                            child: Container(
+                                                              padding: const EdgeInsets.symmetric(horizontal: 3, vertical: 1),
+                                                              color: Colors.black.withOpacity(0.55),
+                                                              child: Text(
+                                                                _idLabel(p),
+                                                                textAlign: TextAlign.center,
+                                                                maxLines: 1,
+                                                                overflow: TextOverflow.ellipsis,
+                                                                style: const TextStyle(color: Colors.white, fontSize: 7, fontWeight: FontWeight.w700),
+                                                              ),
+                                                            ),
+                                                          ),
+                                                          Positioned(
+                                                            left: 0,
+                                                            right: 0,
+                                                            bottom: 0,
+                                                            child: Container(
+                                                              padding: const EdgeInsets.symmetric(horizontal: 3, vertical: 2),
+                                                              decoration: BoxDecoration(
+                                                                gradient: LinearGradient(
+                                                                  begin: Alignment.topCenter,
+                                                                  end: Alignment.bottomCenter,
+                                                                  colors: [Colors.black.withOpacity(0.0), Colors.black.withOpacity(0.75)],
+                                                                ),
+                                                              ),
+                                                              child: Text(
+                                                                _formatTimestamp(p.timestamp),
+                                                                textAlign: TextAlign.center,
+                                                                maxLines: 1,
+                                                                overflow: TextOverflow.ellipsis,
+                                                                style: const TextStyle(color: Colors.white, fontSize: 7.5, fontWeight: FontWeight.w600),
+                                                              ),
+                                                            ),
+                                                          ),
+                                                          if (!_selectMode)
+                                                            Positioned(
+                                                              right: 2,
+                                                              top: 2,
+                                                              child: GestureDetector(
+                                                                onTap: () => _sharePhoto(p),
+                                                                child: Container(
+                                                                  padding: const EdgeInsets.all(3),
+                                                                  decoration: BoxDecoration(
+                                                                    color: Colors.black.withOpacity(0.55),
+                                                                    shape: BoxShape.circle,
+                                                                  ),
+                                                                  child: const Icon(Icons.share, color: Colors.white, size: 11),
+                                                                ),
+                                                              ),
+                                                            ),
+                                                          if (_selectMode)
+                                                            Positioned(
+                                                              right: 2,
+                                                              top: 2,
+                                                              child: Container(
+                                                                width: 18,
+                                                                height: 18,
+                                                                decoration: BoxDecoration(
+                                                                  shape: BoxShape.circle,
+                                                                  color: selected ? kPrimary : Colors.black.withOpacity(0.4),
+                                                                  border: Border.all(color: Colors.white, width: 1.5),
+                                                                ),
+                                                                child: selected
+                                                                    ? const Icon(Icons.check, color: Colors.white, size: 13)
+                                                                    : null,
+                                                              ),
+                                                            ),
+                                                          if (selected)
+                                                            Container(
+                                                              decoration: BoxDecoration(
+                                                                border: Border.all(color: kPrimary, width: 3),
+                                                                borderRadius: BorderRadius.circular(6),
+                                                              ),
+                                                            ),
+                                                        ],
+                                                      ),
                                                     ),
                                                   );
                                                 },
@@ -186,9 +509,40 @@ class _GalleryScreenState extends State<GalleryScreen> {
                           },
                         ),
             ),
+            // Footer: shows where all photos are stored on the device, and
+            // which build this is (for confirming a fresh CI build is
+            // actually installed when troubleshooting the Gallery mirror).
+            if (_storagePathLabel.isNotEmpty)
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                color: kPrimary.withOpacity(0.06),
+                child: Row(
+                  children: [
+                    Icon(Icons.folder_open, size: 15, color: kPrimary.withOpacity(0.7)),
+                    const SizedBox(width: 6),
+                    Expanded(
+                      child: Text(
+                        'Saved at: $_storagePathLabel  ·  also in Gallery/Photos under Pictures/UUDS  ·  Build: $kBuildId',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(fontSize: 10.5, color: kPrimary.withOpacity(0.8)),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
           ],
         ),
       ),
+      floatingActionButton: (_selectMode && _selectedIds.isNotEmpty)
+          ? FloatingActionButton.extended(
+              onPressed: _shareSelected,
+              backgroundColor: kPrimary,
+              icon: const Icon(Icons.share, color: Colors.white),
+              label: Text('Share ${_selectedIds.length}', style: const TextStyle(color: Colors.white)),
+            )
+          : null,
     );
   }
 }

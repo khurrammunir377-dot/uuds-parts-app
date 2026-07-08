@@ -2,11 +2,12 @@ import 'dart:io';
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
-import 'package:path_provider/path_provider.dart';
 import '../db/db_helper.dart';
 import '../models/models.dart';
+import '../utils/build_info.dart';
 import '../utils/ocr_util.dart';
 import '../utils/page_transitions.dart';
+import '../utils/storage_paths.dart';
 import 'part_location_screen.dart';
 
 class CameraScreen extends StatefulWidget {
@@ -36,6 +37,8 @@ class _CameraScreenState extends State<CameraScreen> {
   String? _error;
   final List<InspectionPhoto> _sessionPhotos = []; // newest first
   final TextEditingController _remarksController = TextEditingController();
+  int _galleryPublishFailures = 0;
+  final List<String> _galleryPublishErrors = [];
 
   @override
   void initState() {
@@ -77,12 +80,11 @@ class _CameraScreenState extends State<CameraScreen> {
   }
 
   Future<Directory> _targetDirectory() async {
-    final base = await getExternalStorageDirectory();
-    final path =
-        '${base!.path}/UUDS_Aero_Photos/${widget.aircraft.regNo}/${widget.type.label}/${widget.partLocation.name}';
-    final dir = Directory(path);
-    if (!await dir.exists()) await dir.create(recursive: true);
-    return dir;
+    return StoragePaths.photoDirectory(
+      aircraftReg: widget.aircraft.regNo,
+      inspectionTypeLabel: widget.type.label,
+      location: widget.partLocation.name,
+    );
   }
 
   Future<void> _captureAndSave() async {
@@ -97,6 +99,25 @@ class _CameraScreenState extends State<CameraScreen> {
           'IMG_${widget.aircraft.regNo}_${widget.type.label}_${widget.partLocation.name.replaceAll(' ', '')}_$stamp.jpg';
       final destPath = '${dir.path}/$fileName';
       await File(xfile.path).copy(destPath);
+
+      // Mirror the photo into the public Gallery (Pictures/UUDS/Aircraft/
+      // InspectionType/Location/...) via MediaStore so it shows up in the
+      // Gallery/Photos app and file manager right away, in the correct
+      // sub-folder. This is independent of the private working copy above,
+      // which is what the app itself always reads back from.
+      final published = await StoragePaths.publishToGallery(
+        sourcePath: destPath,
+        aircraftReg: widget.aircraft.regNo,
+        inspectionTypeLabel: widget.type.label,
+        location: widget.partLocation.name,
+        fileName: fileName,
+      );
+      if (!published.success) {
+        _galleryPublishFailures++;
+        if (published.error != null && !_galleryPublishErrors.contains(published.error)) {
+          _galleryPublishErrors.add(published.error!);
+        }
+      }
 
       final record = InspectionPhoto(
         employeeName: widget.employee.name,
@@ -237,13 +258,132 @@ class _CameraScreenState extends State<CameraScreen> {
     }
   }
 
-  void _finish() {
+  Future<void> _finish() async {
+    final dir = await _targetDirectory();
+    final photoCount = _sessionPhotos.length;
+    final publishedCount = photoCount - _galleryPublishFailures;
+    final galleryFolderPath =
+        'Pictures/UUDS/${widget.aircraft.regNo}/${widget.type.label}/${widget.partLocation.name}';
+
+    if (!mounted) return;
+
+    await showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => AlertDialog(
+        title: const Row(
+          children: [
+            Icon(Icons.check_circle, color: Colors.green),
+            SizedBox(width: 8),
+            Text('Session Complete'),
+          ],
+        ),
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                photoCount == 0
+                    ? 'No photos were taken this session.'
+                    : '$photoCount photo${photoCount == 1 ? '' : 's'} saved successfully.',
+                style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 15),
+              ),
+              const SizedBox(height: 12),
+              _infoRow('Inspector:', widget.employee.name),
+              _infoRow('Aircraft:', widget.aircraft.regNo),
+              _infoRow('Type:', widget.type.label),
+              _infoRow('Location:', widget.partLocation.name),
+              if (photoCount > 0) ...[
+                const SizedBox(height: 12),
+                const Text('Saved on device at:', style: TextStyle(fontWeight: FontWeight.w600, fontSize: 13)),
+                const SizedBox(height: 4),
+                Container(
+                  padding: const EdgeInsets.all(8),
+                  decoration: BoxDecoration(
+                    color: Colors.grey.shade100,
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: Colors.black12),
+                  ),
+                  child: Text(
+                    dir.path,
+                    style: const TextStyle(fontSize: 12, fontFamily: 'monospace'),
+                  ),
+                ),
+                const SizedBox(height: 10),
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Icon(
+                      publishedCount == photoCount ? Icons.photo_library_rounded : Icons.warning_amber_rounded,
+                      size: 16,
+                      color: publishedCount == photoCount ? Colors.green : Colors.orange,
+                    ),
+                    const SizedBox(width: 6),
+                    Expanded(
+                      child: Text(
+                        publishedCount == photoCount
+                            ? 'Also copied to Gallery/Photos:\n$galleryFolderPath'
+                            : '$publishedCount of $photoCount copied to Gallery/Photos so far:\n$galleryFolderPath',
+                        style: const TextStyle(fontSize: 11.5, color: Colors.black54, height: 1.3),
+                      ),
+                    ),
+                  ],
+                ),
+                if (publishedCount != photoCount && _galleryPublishErrors.isNotEmpty) ...[
+                  const SizedBox(height: 6),
+                  Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.all(8),
+                    decoration: BoxDecoration(
+                      color: Colors.orange.withOpacity(0.08),
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: Colors.orange.withOpacity(0.3)),
+                    ),
+                    child: Text(
+                      'Reason: ${_galleryPublishErrors.join('; ')}\nBuild: $kBuildId',
+                      style: const TextStyle(fontSize: 11, color: Colors.deepOrange),
+                    ),
+                  ),
+                ],
+              ],
+            ],
+          ),
+        ),
+        actions: [
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('OK'),
+          ),
+        ],
+      ),
+    );
+
+    if (!mounted) return;
     Navigator.of(context).pushReplacement(
       fadeSlideRoute(PartLocationScreen(
         employee: widget.employee,
         type: widget.type,
         aircraft: widget.aircraft,
       )),
+    );
+  }
+
+  Widget _infoRow(String label, String value) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 4),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(
+            width: 80,
+            child: Text(label, style: const TextStyle(fontSize: 13, color: Colors.black54)),
+          ),
+          Expanded(
+            child: Text(value, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
+          ),
+        ],
+      ),
     );
   }
 
@@ -410,7 +550,7 @@ class _CameraScreenState extends State<CameraScreen> {
                       ),
                     ),
 
-                    // Finish button (bottom-right of capture button) - just navigates back
+                    // Finish button (bottom-right of capture button)
                     Positioned(
                       bottom: 36,
                       right: 24,

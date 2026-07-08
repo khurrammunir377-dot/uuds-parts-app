@@ -24,6 +24,10 @@ class _UudsPartsAppState extends State<UudsPartsApp> {
 
   Future<void> _requestPermissions() async {
     await Permission.camera.request();
+    // Photos are saved to the app's own private folder (no permission
+    // needed on any Android version) and mirrored into the public Gallery
+    // via the MediaStore API, which also needs no special permission —
+    // so there's nothing further to request here.
   }
 
   @override

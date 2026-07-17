@@ -69,7 +69,58 @@ Bluetooth/USB — all offline, sharing just uses whatever app you pick.
   simple PIN lock.
 - Minimum Android version supported: Android 7.0 (covers virtually all work devices).
 
-## Production fixes (this update)
+## Update 5 (fixed: reinstalling wouldn't update the app)
+**Root cause:** every CI build was signing the release APK with a random, throwaway debug
+key that GitHub's build server generates fresh on every single run (nothing persists it
+between runs). Android treats an app signed with a different key as a different app, so it
+refused to install "as an update" over the one already on the phone — the only way in was to
+uninstall the old one first.
+
+**Fix:** generated one permanent signing key (`signing/uuds-release.keystore.jks`, committed
+to the repo, valid 30 years) and wired it into the build so every future build — no matter
+how many times CI runs — signs with the exact same key. From this build onward, installing a
+newer APK over the current one will update it in place, no uninstall needed.
+
+**⚠️ Important — do not delete the `signing/` folder from the repo.** It's the one and only
+copy of the signing key. If it's ever lost, every future build would need a brand-new key
+again, meaning one more forced uninstall to move to it (and there's no way to recover
+anything signed with the lost key). Since this file now lives in your GitHub repo, GitHub
+itself is your backup — just don't delete or overwrite that folder.
+
+Note: today's update to fix this is itself a one-time exception — installing today's APK
+over your current one will still need one uninstall (since today's is the first build using
+the new permanent key, and it doesn't match whatever key your currently-installed copy has).
+Every build after today should update normally.
+
+## Update 4 (admin rights, bulk delete, splash tap fix)
+1. **Staff ID 476 (Khurram Munir) is now an admin.** Admin status unlocks bulk-delete on the
+   Aircraft and Part Location screens (a delete-multiple icon appears in the app bar only for
+   this account). To add more admins later, it's a one-line change in `utils/session.dart`.
+2. **Bulk delete for aircraft and locations** — tap the new icon in the app bar to enter
+   selection mode, check off as many aircraft/locations as you like, then confirm to delete
+   them all at once. Past photo records are always kept regardless.
+3. **Splash screen no longer reacts to taps at all** — previously a tap on the splash screen
+   could interrupt/pause it, needing a second tap to move on. It now ignores all touch input,
+   so it always finishes its animation and moves to Home on its own after 5 seconds no matter
+   what's tapped.
+
+## Update 3 (auto-logout, per-aircraft locations, roster cleanup)
+1. **Auto-logout after 10 minutes of inactivity** — if nobody taps, scrolls, or otherwise
+   touches the screen for 10 minutes, the signed-in inspector is automatically logged out
+   app-wide (same end state as the manual double-back-press logout on Home) and the app
+   lands back on a fresh Home screen with no inspector selected.
+2. **Part locations are now independent per aircraft** — previously all aircraft shared one
+   single list of locations behind the scenes, so adding, renaming, or deleting a location
+   while working on one aircraft silently changed the list for every other aircraft too.
+   Each aircraft now gets its own copy of the standard location list the moment it's added,
+   and from then on every add/edit/delete only ever affects that one aircraft. Existing
+   installs are migrated automatically (each aircraft you already had keeps a copy of
+   whatever was in the old shared list — nothing is lost).
+3. **Removed Paresh Abraham from the inspector roster** — he no longer appears as a
+   selectable inspector on already-installed devices once they update (existing photo
+   records already logged under his name are left untouched, as a historical record).
+
+## Production fixes (previous update)
 1. **Splash screen aircraft icon** — was climbing diagonally up-and-right at 45°; now flies
    fully horizontal, nose pointing straight right, and is noticeably larger.
 2. **Public Gallery folder structure** — photos are now mirrored into the device's Photos/
